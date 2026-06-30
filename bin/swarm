@@ -1,0 +1,573 @@
+#!/usr/bin/env python3
+"""swarm — deterministic ops for the swarm plugin.
+
+Owns: scaffolding (new), scope resolution (here), state files (questions,
+approvals), routing (switch, list, status, archive). The orchestrator skill
+calls this CLI for anything that must be deterministic; the LLM never edits
+state files by hand.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import sys
+import time
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+TEMPLATES = PLUGIN_ROOT / "templates"
+SWARMS_HOME = Path.home() / "swarm"
+DEV_HOME = Path.home() / "dev"
+GLOBAL_STATE = Path.home() / ".swarm"
+ACTIVE_FILE = GLOBAL_STATE / "active.json"
+
+
+# ----- utils -------------------------------------------------------------- #
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def read_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return default
+
+
+def write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=False) + "\n")
+
+
+def die(msg: str, code: int = 1) -> None:
+    print(f"swarm: {msg}", file=sys.stderr)
+    sys.exit(code)
+
+
+def out(payload, human: str | None = None) -> None:
+    """Print as JSON if --json was passed, otherwise human-readable."""
+    if PRINT_JSON:
+        print(json.dumps(payload, indent=2, sort_keys=False))
+    else:
+        print(human if human is not None else json.dumps(payload, indent=2))
+
+
+PRINT_JSON = False  # toggled by --json
+
+
+# ----- scope resolution --------------------------------------------------- #
+
+
+def find_swarm_from_cwd(cwd: Path) -> str | None:
+    """Walk up from cwd looking for .swarm pointer or .swarm.json marker."""
+    p = cwd.resolve()
+    for ancestor in [p, *p.parents]:
+        pointer = ancestor / ".swarm"
+        if pointer.is_file():
+            data = read_json(pointer, {})
+            if isinstance(data, dict) and data.get("venture"):
+                return data["venture"]
+        marker = ancestor / ".swarm.json"
+        if marker.is_file():
+            data = read_json(marker, {})
+            if isinstance(data, dict) and data.get("venture"):
+                return data["venture"]
+    return None
+
+
+def resolve_active() -> str | None:
+    state = read_json(ACTIVE_FILE, {})
+    return state.get("active") if isinstance(state, dict) else None
+
+
+def set_active(name: str) -> None:
+    GLOBAL_STATE.mkdir(parents=True, exist_ok=True)
+    state = read_json(ACTIVE_FILE, {}) or {}
+    state["active"] = name
+    state["last_engaged"] = now_iso()
+    write_json(ACTIVE_FILE, state)
+
+
+def swarm_dir(name: str) -> Path:
+    return SWARMS_HOME / name
+
+
+def swarm_exists(name: str) -> bool:
+    return (swarm_dir(name) / ".swarm.json").is_file()
+
+
+# ----- commands ----------------------------------------------------------- #
+
+
+SHAPE_LEAN = {
+    "shape": "lean",
+    "leads": ["cos", "founder", "eng-lead", "marketing-lead"],
+    "workers": ["developer", "copywriter", "researcher", "designer", "qa", "reviewer"],
+    "skills_per_role": {
+        "cos": ["swarm-comms", "swarm-delegate"],
+        "founder": ["grilling", "writing-fragments"],
+        "eng-lead": ["codebase-design", "code-review", "diagnose", "tdd", "run", "verify"],
+        "marketing-lead": ["writing-fragments", "writing-shape", "writing-beats"],
+    },
+}
+
+DEFAULT_POLICY = {
+    "authority": {
+        "default": "gated",
+        "auto_approve": [],
+    },
+    "concurrency": {
+        "max_parallel_workers": 3,
+        "max_per_lead": 1,
+        "worker_timeout_seconds": 900,
+    },
+    "escalation": {
+        "question_escalation_after_hours": 24,
+        "approval_escalation_after_hours": 24,
+    },
+    "tokens": {
+        "max_per_swarm_per_day": None,
+        "max_per_worker_run": None,
+    },
+}
+
+
+def cmd_new(args) -> None:
+    name = args.name
+    if not name.replace("-", "").replace("_", "").isalnum():
+        die(f"invalid venture name: {name} (use letters, digits, - or _)")
+    if swarm_exists(name):
+        die(f"swarm '{name}' already exists at {swarm_dir(name)}")
+
+    home = swarm_dir(name)
+    home.mkdir(parents=True, exist_ok=True)
+
+    # repo path resolution
+    if args.no_repo:
+        repo_path = None
+    elif args.repo:
+        repo_path = str(Path(args.repo).expanduser().resolve())
+    else:
+        repo_path = str((DEV_HOME / name).resolve())
+
+    # marker
+    write_json(home / ".swarm.json", {
+        "venture": name,
+        "created_at": now_iso(),
+        "plugin_version": "0.1.0",
+    })
+
+    # shape + policy
+    shape = dict(SHAPE_LEAN)
+    shape["repo"] = repo_path
+    shape["created_at"] = now_iso()
+    write_json(home / "shape.json", shape)
+    write_json(home / "policy.json", DEFAULT_POLICY)
+
+    # state dirs + files
+    (home / "questions").mkdir(exist_ok=True)
+    write_json(home / "questions" / "pending.json", [])
+    write_json(home / "questions" / "resolved.json", [])
+
+    (home / "approvals").mkdir(exist_ok=True)
+    write_json(home / "approvals" / "pending.json", [])
+    write_json(home / "approvals" / "resolved.json", [])
+
+    (home / "workers" / "spawned").mkdir(parents=True, exist_ok=True)
+    write_json(home / "workers" / "queue.json", [])
+
+    (home / "artifacts").mkdir(exist_ok=True)
+
+    # agents
+    persona_src = TEMPLATES / "personas"
+    for role in shape["leads"]:
+        role_dir = home / "agents" / role
+        role_dir.mkdir(parents=True, exist_ok=True)
+        (role_dir / "memory").mkdir(exist_ok=True)
+        (role_dir / "memory" / "MEMORY.md").write_text(
+            f"# {role} memory\n\n_Empty. Topic files appear here as memory accumulates._\n"
+        )
+        (role_dir / "inbox.md").write_text("# inbox\n\n_No messages._\n")
+        src = persona_src / f"{role}.md"
+        if src.exists():
+            shutil.copy(src, role_dir / "persona.md")
+        else:
+            (role_dir / "persona.md").write_text(
+                f"# {role}\n\n_Persona template not found in plugin._\n"
+            )
+
+    # seed brief
+    if args.brief:
+        (home / "venture-brief-seed.md").write_text(
+            f"# seed brief\n\nWritten at /swarm-new time. Kickoff grilling will refine this.\n\n{args.brief}\n"
+        )
+
+    # repo init
+    repo_status = None
+    if repo_path:
+        repo_p = Path(repo_path)
+        if not repo_p.exists():
+            repo_p.mkdir(parents=True, exist_ok=True)
+            try:
+                import subprocess
+                subprocess.run(["git", "init", "-q"], cwd=repo_p, check=False)
+                repo_status = "created"
+            except FileNotFoundError:
+                repo_status = "created_no_git"
+        else:
+            repo_status = "exists"
+        # write .swarm pointer
+        write_json(repo_p / ".swarm", {"venture": name, "swarm_home": str(home)})
+
+    # set active
+    set_active(name)
+
+    payload = {
+        "venture": name,
+        "swarm_home": str(home),
+        "repo": repo_path,
+        "repo_status": repo_status,
+        "shape": shape["shape"],
+        "leads": shape["leads"],
+        "next": "run /swarm-new's kickoff (grilling) to produce venture-brief.md",
+    }
+    human = (
+        f"✓ swarm '{name}' created at {home}\n"
+        f"  shape:  {shape['shape']}\n"
+        f"  leads:  {', '.join(shape['leads'])}\n"
+        f"  repo:   {repo_path or '(no repo)'} ({repo_status or 'n/a'})\n"
+        f"  active: now scoped to {name}"
+    )
+    out(payload, human)
+
+
+def cmd_here(args) -> None:
+    name = find_swarm_from_cwd(Path.cwd())
+    source = "cwd"
+    if not name:
+        name = resolve_active()
+        source = "active"
+    if not name:
+        out({"scoped": False, "reason": "no swarm pinned by cwd, no active swarm"},
+            "no swarm in scope. run `/swarm-new <name>` to create one.")
+        return
+    if not swarm_exists(name):
+        out({"scoped": False, "reason": f"active swarm '{name}' does not exist on disk"},
+            f"active swarm '{name}' is stale — it does not exist at {swarm_dir(name)}")
+        return
+    home = swarm_dir(name)
+    shape = read_json(home / "shape.json", {})
+    pending_q = len(read_json(home / "questions" / "pending.json", []))
+    pending_a = len(read_json(home / "approvals" / "pending.json", []))
+    payload = {
+        "scoped": True,
+        "venture": name,
+        "source": source,
+        "swarm_home": str(home),
+        "repo": shape.get("repo"),
+        "shape": shape.get("shape"),
+        "leads": shape.get("leads", []),
+        "pending_questions": pending_q,
+        "pending_approvals": pending_a,
+    }
+    human = (
+        f"swarm: {name}  (scoped via {source})\n"
+        f"  home:      {home}\n"
+        f"  repo:      {shape.get('repo') or '(none)'}\n"
+        f"  shape:     {shape.get('shape', '?')}\n"
+        f"  leads:     {', '.join(shape.get('leads', []))}\n"
+        f"  pending:   {pending_q} questions, {pending_a} approvals"
+    )
+    out(payload, human)
+
+
+def cmd_list(args) -> None:
+    if not SWARMS_HOME.exists():
+        out({"swarms": []}, "no swarms yet. run `/swarm-new <name>` to create one.")
+        return
+    swarms = []
+    for d in sorted(SWARMS_HOME.iterdir()):
+        if (d / ".swarm.json").is_file():
+            marker = read_json(d / ".swarm.json", {})
+            shape = read_json(d / "shape.json", {})
+            swarms.append({
+                "venture": d.name,
+                "created_at": marker.get("created_at"),
+                "shape": shape.get("shape"),
+                "repo": shape.get("repo"),
+            })
+    active = resolve_active()
+    payload = {"swarms": swarms, "active": active}
+    if not swarms:
+        human = "no swarms yet."
+    else:
+        lines = ["swarms:"]
+        for s in swarms:
+            marker = " *" if s["venture"] == active else "  "
+            lines.append(f"{marker} {s['venture']:20s}  shape={s['shape']:12s}  repo={s['repo'] or '(none)'}")
+        lines.append("")
+        lines.append(f"(* = active)")
+        human = "\n".join(lines)
+    out(payload, human)
+
+
+def cmd_switch(args) -> None:
+    name = args.name
+    if not swarm_exists(name):
+        die(f"no swarm '{name}'. run `swarm list` to see options.")
+    set_active(name)
+    cmd_here(argparse.Namespace())
+
+
+def cmd_status(args) -> None:
+    name = args.name or find_swarm_from_cwd(Path.cwd()) or resolve_active()
+    if not name:
+        die("no swarm in scope. pass a name or run inside a venture dir.")
+    if not swarm_exists(name):
+        die(f"no swarm '{name}'.")
+    home = swarm_dir(name)
+    questions = read_json(home / "questions" / "pending.json", [])
+    approvals = read_json(home / "approvals" / "pending.json", [])
+    workers_dir = home / "workers" / "spawned"
+    active_workers = []
+    if workers_dir.exists():
+        for d in workers_dir.iterdir():
+            if d.is_dir():
+                brief = d / "brief.md"
+                result = d / "result.md"
+                seen = d / "seen.flag"
+                state = "done" if result.exists() else "running"
+                active_workers.append({
+                    "id": d.name,
+                    "state": state,
+                    "result_seen": seen.exists(),
+                })
+    payload = {
+        "venture": name,
+        "pending_questions": questions,
+        "pending_approvals": approvals,
+        "workers": active_workers,
+    }
+    lines = [f"swarm: {name}", ""]
+    lines.append(f"questions pending ({len(questions)}):")
+    for q in questions[:10]:
+        lines.append(f"  [{q.get('id')}] from {q.get('from')}: {q.get('question', '')[:80]}")
+    if not questions:
+        lines.append("  (none)")
+    lines.append("")
+    lines.append(f"approvals pending ({len(approvals)}):")
+    for a in approvals[:10]:
+        lines.append(f"  [{a.get('id')}] {a.get('action')} from {a.get('from')}: {a.get('target', '')[:80]}")
+    if not approvals:
+        lines.append("  (none)")
+    lines.append("")
+    lines.append(f"workers ({len(active_workers)}):")
+    for w in active_workers[:10]:
+        flag = "✓" if w["result_seen"] else ("●" if w["state"] == "done" else "…")
+        lines.append(f"  {flag} {w['id']}  ({w['state']})")
+    if not active_workers:
+        lines.append("  (none)")
+    out(payload, "\n".join(lines))
+
+
+def _swarm_for(name_or_none: str | None) -> tuple[str, Path]:
+    name = name_or_none or find_swarm_from_cwd(Path.cwd()) or resolve_active()
+    if not name:
+        die("no swarm in scope. pass --venture or run inside a venture dir.")
+    if not swarm_exists(name):
+        die(f"no swarm '{name}'.")
+    return name, swarm_dir(name)
+
+
+def _pop_pending(home: Path, queue: str, item_id: str) -> dict | None:
+    pending = read_json(home / queue / "pending.json", [])
+    for i, item in enumerate(pending):
+        if item.get("id") == item_id:
+            popped = pending.pop(i)
+            write_json(home / queue / "pending.json", pending)
+            return popped
+    return None
+
+
+def cmd_answer(args) -> None:
+    name, home = _swarm_for(args.venture)
+    popped = _pop_pending(home, "questions", args.id)
+    if popped is None:
+        die(f"no pending question with id '{args.id}'")
+    popped["resolved_at"] = now_iso()
+    popped["resolution"] = {"pick": args.pick, "note": args.note}
+    resolved = read_json(home / "questions" / "resolved.json", [])
+    resolved.append(popped)
+    write_json(home / "questions" / "resolved.json", resolved)
+    out({"resolved": popped}, f"✓ answered {args.id}")
+
+
+def cmd_approve(args) -> None:
+    name, home = _swarm_for(args.venture)
+    popped = _pop_pending(home, "approvals", args.id)
+    if popped is None:
+        die(f"no pending approval with id '{args.id}'")
+    popped["resolved_at"] = now_iso()
+    popped["resolution"] = {"verdict": "approved", "note": args.note}
+    resolved = read_json(home / "approvals" / "resolved.json", [])
+    resolved.append(popped)
+    write_json(home / "approvals" / "resolved.json", resolved)
+    out({"resolved": popped}, f"✓ approved {args.id}")
+
+
+def cmd_reject(args) -> None:
+    name, home = _swarm_for(args.venture)
+    popped = _pop_pending(home, "approvals", args.id)
+    if popped is None:
+        die(f"no pending approval with id '{args.id}'")
+    popped["resolved_at"] = now_iso()
+    popped["resolution"] = {"verdict": "rejected", "note": args.note}
+    resolved = read_json(home / "approvals" / "resolved.json", [])
+    resolved.append(popped)
+    write_json(home / "approvals" / "resolved.json", resolved)
+    out({"resolved": popped}, f"✓ rejected {args.id}")
+
+
+def cmd_ask(args) -> None:
+    """Add a new question to a swarm's pending queue (used by workers/leads)."""
+    name, home = _swarm_for(args.venture)
+    q = {
+        "id": f"q-{uuid.uuid4().hex[:6]}",
+        "from": args.from_,
+        "spawned": now_iso(),
+        "context": args.context or "",
+        "question": args.question,
+        "options": args.options or [],
+    }
+    pending = read_json(home / "questions" / "pending.json", [])
+    pending.append(q)
+    write_json(home / "questions" / "pending.json", pending)
+    out({"added": q}, f"✓ question {q['id']} queued")
+
+
+def cmd_request_approval(args) -> None:
+    """Add a new approval to a swarm's pending queue (used by leads/workers)."""
+    name, home = _swarm_for(args.venture)
+    a = {
+        "id": f"a-{uuid.uuid4().hex[:6]}",
+        "from": args.from_,
+        "spawned": now_iso(),
+        "action": args.action,
+        "target": args.target or "",
+        "preview_path": args.preview_path,
+        "irreversible": args.irreversible,
+    }
+    pending = read_json(home / "approvals" / "pending.json", [])
+    pending.append(a)
+    write_json(home / "approvals" / "pending.json", pending)
+    out({"added": a}, f"✓ approval {a['id']} queued")
+
+
+def cmd_archive(args) -> None:
+    name = args.name
+    if not swarm_exists(name):
+        die(f"no swarm '{name}'.")
+    home = swarm_dir(name)
+    archive_root = SWARMS_HOME / ".archive"
+    archive_root.mkdir(parents=True, exist_ok=True)
+    dest = archive_root / f"{name}-{int(time.time())}"
+    shutil.move(str(home), str(dest))
+    # clear active if it was this one
+    state = read_json(ACTIVE_FILE, {}) or {}
+    if state.get("active") == name:
+        state["active"] = None
+        write_json(ACTIVE_FILE, state)
+    out({"archived": name, "dest": str(dest)}, f"✓ archived {name} → {dest}")
+
+
+# ----- main --------------------------------------------------------------- #
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="swarm", description="swarm plugin CLI")
+    p.add_argument("--json", action="store_true", help="emit JSON instead of human text")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("new", help="scaffold a new swarm")
+    s.add_argument("name")
+    s.add_argument("--shape", default="lean")
+    s.add_argument("--brief", default=None)
+    s.add_argument("--repo", default=None, help="path to product repo (default: ~/dev/<name>)")
+    s.add_argument("--no-repo", action="store_true", help="skip product repo creation")
+    s.set_defaults(func=cmd_new)
+
+    s = sub.add_parser("here", help="show scoped venture (cwd → active fallback)")
+    s.set_defaults(func=cmd_here)
+
+    s = sub.add_parser("list", help="list all swarms")
+    s.set_defaults(func=cmd_list)
+
+    s = sub.add_parser("switch", help="set active swarm")
+    s.add_argument("name")
+    s.set_defaults(func=cmd_switch)
+
+    s = sub.add_parser("status", help="show pending queues and worker state")
+    s.add_argument("name", nargs="?")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("answer", help="resolve a pending question")
+    s.add_argument("id")
+    s.add_argument("--pick", default=None)
+    s.add_argument("--note", default=None)
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_answer)
+
+    s = sub.add_parser("approve", help="approve a pending action")
+    s.add_argument("id")
+    s.add_argument("--note", default=None)
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_approve)
+
+    s = sub.add_parser("reject", help="reject a pending action")
+    s.add_argument("id")
+    s.add_argument("--note", default=None)
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_reject)
+
+    s = sub.add_parser("ask", help="add a question to pending queue")
+    s.add_argument("question")
+    s.add_argument("--from", dest="from_", required=True)
+    s.add_argument("--context", default=None)
+    s.add_argument("--options", nargs="*", default=None)
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_ask)
+
+    s = sub.add_parser("request-approval", help="add an approval to pending queue")
+    s.add_argument("action")
+    s.add_argument("--from", dest="from_", required=True)
+    s.add_argument("--target", default=None)
+    s.add_argument("--preview-path", default=None)
+    s.add_argument("--irreversible", action="store_true")
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_request_approval)
+
+    s = sub.add_parser("archive", help="archive a swarm")
+    s.add_argument("name")
+    s.set_defaults(func=cmd_archive)
+
+    return p
+
+
+def main(argv: list[str]) -> None:
+    global PRINT_JSON
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    PRINT_JSON = args.json
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

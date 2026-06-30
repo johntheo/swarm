@@ -1,0 +1,12 @@
+{
+  "name": "swarm",
+  "displayName": "Swarm",
+  "description": "Run a virtual startup org — founders, engineers, marketing — from inside Claude Code. One invocation, then conversational. Skills, files, memory, gated approvals under the hood.",
+  "author": {
+    "name": "John Theo Souza",
+    "email": "john.theo.souza@gmail.com"
+  },
+  "license": "MIT",
+  "keywords": ["agents", "startup", "orchestration", "swarm", "workflow"],
+  "repository": "https://github.com/johntheo/swarm"
+}
