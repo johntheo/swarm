@@ -1,6 +1,7 @@
 {
   "name": "swarm",
   "displayName": "Swarm",
+  "version": "0.1.0",
   "description": "Run a virtual startup org — founders, engineers, marketing — from inside Claude Code. One invocation, then conversational. Skills, files, memory, gated approvals under the hood.",
   "author": {
     "name": "John Theo Souza",
