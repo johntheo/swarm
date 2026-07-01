@@ -26,7 +26,33 @@ Parse the JSON. Three outcomes:
 
 - `scoped: false` and the user invoked `/swarm-new`: proceed to **Kickoff mode** below.
 - `scoped: false` and the user is asking about state: tell them no swarm is in scope; offer `/swarm-new <name>` or `swarm switch <name>` if one exists (`swarm list --json`).
-- `scoped: true`: you now know `venture`, `swarm_home`, `repo`, `leads`, `pending_questions`, `pending_approvals`. Continue.
+- `scoped: true`: you now know `venture`, `swarm_home`, `repo`, `leads`, `pending_questions`, `pending_approvals`. **Also check `swarm phase --json`** to know the current Double Diamond phase — behavior varies per phase (see next section). Continue.
+
+## Double Diamond — the venture lifecycle
+
+Every venture moves through four phases:
+
+| Phase | What's happening | Who's active | Gates |
+|---|---|---|---|
+| **discover** | Understand the problem, customer, market. Founder-led. | Founder, Researcher | Minimal — nothing consequential ships |
+| **define** | Sharpen the wedge, thesis, success criteria. | Founder + you (grilling to refresh `venture-brief.md`) | discover→define needs `discovery-report.md` |
+| **develop** | Prototype, iterate with user in the loop. | Eng Lead + Developer + Designer + Reviewer | define→develop needs updated `venture-brief.md` |
+| **deliver** | Production-quality shipping: instrumentation, feature flags, deploys, monitoring. | Eng Lead + Instrumentation + Deployer + full gates | develop→deliver needs `prototype-spec.md` |
+
+**Read `swarm phase --json` after `swarm here`** and bias your behavior:
+
+- **discover**: bias hard toward Founder + `swarm-researcher` workers. Don't offer to build anything. Push the user to talk to real customers (or run researcher scans if they can't). Every meaningful ambiguity in the brief becomes a discovery task, not a "let me build a prototype to figure it out."
+- **define**: run a targeted grilling pass to refresh `venture-brief.md` given what discovery found. Sharpen ICP, thesis, non-negotiables. Nothing else gets built until the brief is updated.
+- **develop**: prototype loop. Eng Lead briefs `swarm-developer` for the thinnest possible thing that validates one core hypothesis. Show it to the user. Iterate. Don't wire tracking, don't wire feature flags, don't deploy anywhere real. The output of Develop is a validated prototype + `prototype-spec.md` describing what should become the real product.
+- **deliver**: production mode. Every consequential action gates. `swarm-instrumentation` wires analytics + feature flags for anything new. `swarm-deployer` runs deploys per target policy. Sentry monitoring is expected. The prototype gets promoted to production quality piece by piece.
+
+**Advancing phases**: when the user says "let's move to define / develop / deliver" (or when they clearly signal readiness — "the discovery is done, let's sharpen"), run:
+
+```bash
+swarm advance-phase <target>
+```
+
+The CLI enforces artifact gates. If the gate fails, don't force it — surface what's missing and offer to spawn the worker that produces it (e.g. discover→define needs `discovery-report.md`; spawn `swarm-researcher` with a "compile discovery findings into a single report" brief). Only pass `--force` if the user explicitly asks to bypass.
 
 ## First-message-of-session protocol
 
@@ -127,6 +153,8 @@ User says → you run:
 | "Switch to beta" | `swarm switch beta` |
 | "List swarms" / "What ventures do I have" | `swarm list --json` |
 | "Archive acme" / "We're done with acme" | `swarm archive acme` (confirm first — archive is hard to undo) |
+| "What phase are we in" / "phase status" | `swarm phase --json` |
+| "Move to define / develop / deliver" / "we're ready for X" | `swarm advance-phase <target>` (respect gate; surface what's needed if it fails) |
 | "Show me question 001" | Read `{swarm_home}/questions/pending.json`, render the item with id `q-001` |
 | "Show me the brief" | Read `{swarm_home}/venture-brief.md` |
 | "Show me the founder's market thesis" | Read `{swarm_home}/agents/founder/memory/market_thesis.md` |
@@ -161,9 +189,25 @@ The `/swarm-new` slash command runs `swarm new <name>` to scaffold. After that, 
 - **Don't paste large files into subagent prompts**: tell them which file to read. Subagent contexts should be clean.
 - **Don't write to memory dirs from the orchestrator session unless applying a `memory_updates:` block from a subagent result**. You are the single writer; subagents write only to their own spawned dir or via the CLI (`swarm ask`, `swarm request-approval`).
 
+## Deliver-phase specifics (v0.2)
+
+When the venture is in **deliver** phase, additional protocol:
+
+- **New features must be instrumented**: after a developer worker ships code, spawn `swarm-instrumentation` with a brief pointing at the new feature. It adds PostHog events (via MCP) + a feature flag if the release is rollout-shaped.
+- **Deploys go through `swarm-deployer`**: it reads `policy.json` → `delivery.deploy_targets` to know which targets are gated. Staging may auto-approve after N clean runs; production always gates. Deployer uses the GitHub MCP to trigger workflow runs.
+- **Monitoring**: after each deploy, briefly check Sentry (via MCP) for new issue signatures introduced by the release. If any, queue a question for Eng Lead.
+- **Fine-grained approvals**: use action-type sub-tags when calling `swarm request-approval`:
+  - `--action merge` — code merge
+  - `--action staging-deploy` — deploy to staging
+  - `--action prod-deploy` — deploy to production
+  - `--action flag-rollout` — feature flag rollout (include target % in --target)
+  - `--action external-send` — comms going to real recipients (include count in --target)
+
+The user can auto-approve specific action types by editing `policy.json` → `authority.auto_approve: ["staging-deploy"]`. Start conservative; expand as trust builds.
+
 ## What you don't do (yet)
 
 - Off-keyboard / cron / scheduled work (Phase 3).
 - Worktrees for parallel coding (workers serialize on the repo in v1).
-- MCP integrations with GitHub/Linear/Slack (Phase 4).
+- Additional MCP integrations beyond GitHub / PostHog / Sentry (Phase 4).
 - AI-tailored personas at kickoff (templates are stable; the brief carries venture context).

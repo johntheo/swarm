@@ -1,13 +1,44 @@
 {
   "name": "swarm",
   "displayName": "Swarm",
-  "version": "0.1.0",
-  "description": "Run a virtual startup org — founders, engineers, marketing — from inside Claude Code. One invocation, then conversational. Skills, files, memory, gated approvals under the hood.",
+  "version": "0.2.0",
+  "description": "Run a virtual startup org — founders, engineers, marketing — from inside Claude Code. Double Diamond phases (discover → define → develop → deliver). GitHub / PostHog / Sentry MCPs for delivery.",
   "author": {
     "name": "John Theo Souza",
     "email": "john.theo.souza@gmail.com"
   },
   "license": "MIT",
-  "keywords": ["agents", "startup", "orchestration", "swarm", "workflow"],
-  "repository": "https://github.com/johntheo/swarm"
+  "keywords": ["agents", "startup", "orchestration", "swarm", "workflow", "double-diamond"],
+  "repository": "https://github.com/johntheo/swarm",
+  "userConfig": {
+    "github_token": {
+      "type": "string",
+      "title": "GitHub token",
+      "description": "PAT with repo + workflow scopes. Only needed in deliver phase for deploys and PR ops. Leave empty if you don't use the GitHub MCP.",
+      "sensitive": true
+    },
+    "posthog_api_key": {
+      "type": "string",
+      "title": "PostHog personal API key",
+      "description": "Personal API key from PostHog (Settings → Personal API keys). Used to create feature flags and inspect events. Leave empty if you don't use PostHog.",
+      "sensitive": true
+    },
+    "posthog_host": {
+      "type": "string",
+      "title": "PostHog host",
+      "description": "e.g. https://us.i.posthog.com or https://eu.i.posthog.com. Leave empty for the default.",
+      "default": "https://us.i.posthog.com"
+    },
+    "posthog_project_id": {
+      "type": "string",
+      "title": "PostHog project ID",
+      "description": "Numeric project id. Find in PostHog project settings. Leave empty if you don't use PostHog."
+    },
+    "sentry_auth_token": {
+      "type": "string",
+      "title": "Sentry auth token",
+      "description": "Internal integration token (Settings → Auth Tokens). Only needed in deliver phase for issue lookups. Leave empty if you don't use Sentry.",
+      "sensitive": true
+    }
+  }
 }

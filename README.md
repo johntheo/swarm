@@ -61,20 +61,58 @@ After kickoff, just talk:
 
 Persistent leads accumulate memory in `~/swarm/<venture>/agents/<role>/memory/`. Personas live in the plugin (`templates/personas/`) and are copied at kickoff. The brief carries all per-venture context.
 
-## What's in v1
+## Double Diamond phases
+
+Every venture moves through four phases; the orchestrator biases behavior per phase:
+
+| Phase | What happens | Who's active |
+|---|---|---|
+| **discover** | Understand the problem, customer, market. | Founder + Researcher |
+| **define** | Sharpen the wedge, thesis, success criteria. | Founder + grilling refresh of `venture-brief.md` |
+| **develop** | Prototype, iterate with user in the loop. | Eng Lead + Developer + Designer + Reviewer |
+| **deliver** | Production shipping: instrumentation, feature flags, deploys, monitoring. | Eng Lead + Instrumentation + Deployer + full gates |
+
+Phase transitions are gated (each needs an artifact — discovery report, updated brief, prototype spec). Run `swarm phase` to see current state; `swarm advance-phase <target>` to move (or `--force` to bypass).
+
+## Delivery integrations (MCP)
+
+In **deliver** phase, three MCP servers wire the swarm to real-world tools:
+
+- **GitHub** (`github/github-mcp-server` — remote, hosted) — for PRs, deploys via Actions, issue ops.
+- **PostHog** (`@posthog/mcp`) — feature flags + event instrumentation.
+- **Sentry** (hosted MCP at `mcp.sentry.dev`) — post-deploy issue lookup.
+
+Provide tokens at install time (Claude Code will prompt via the plugin's `userConfig`) or leave them empty if you don't need delivery yet — the plugin core works fine without them; only the delivery workers require them.
+
+### Setup checklist for deliver phase
+
+Before advancing a venture to `deliver`:
+
+1. GitHub PAT with `repo` + `workflow` scopes.
+2. Repo has `.github/workflows/deploy-<target>.yml` workflows (staging / production).
+3. PostHog project with a personal API key.
+4. Sentry auth token from an internal integration.
+5. Run `/plugin config swarm` to enter the tokens.
+
+MCP package names above are best-effort as of 2026-07. If a provider ships a new canonical URL/package, edit `.claude-plugin/plugin.json` and `.mcp.json` — the tokens still slot in via `${user_config.*}`.
+
+## What's in v0.2
 
 - `/swarm-new <name>` — bootstrap a venture.
-- `swarm` CLI: `new`, `here`, `list`, `switch`, `status`, `answer`, `approve`, `reject`, `ask`, `request-approval`, `archive`.
+- `swarm` CLI: `new`, `here`, `list`, `switch`, `status`, `phase`, `advance-phase`, `answer`, `approve`, `reject`, `ask`, `request-approval`, `archive`.
 - Lead consultation (Founder, Eng Lead, Marketing Lead) with transparent attribution + memory write-back.
 - Background workers with brief/result file contract + auto-retry-once on crash → escalate.
+- Delivery workers: `swarm-instrumentation` (PostHog events + flags) + `swarm-deployer` (GitHub Actions deploys + Sentry post-check).
 - Gated approvals queue + questions queue, drained conversationally.
 - Project-pinned scoping with global fallback (`.swarm` pointer + `~/.swarm/active.json`).
+- Fine-grained approval action types: `merge`, `staging-deploy`, `prod-deploy`, `flag-rollout`, `external-send`.
+- Per-target deploy policy with auto-approve-after-N-clean-runs for staging.
 
 ## What's deferred
 
-- Cron-driven scheduled work / off-keyboard progress.
-- Worktrees for parallel coding (workers serialize on the repo in v1).
-- MCP integrations (GitHub, Linear, Slack, Stripe).
+- Cron-driven scheduled work / off-keyboard progress (Phase 3).
+- Worktrees for parallel coding (workers serialize on the repo in v0.2).
+- Additional MCP integrations beyond GitHub / PostHog / Sentry (Phase 4).
 - AI-tailored personas at kickoff.
 - Cross-venture institutional memory.
 

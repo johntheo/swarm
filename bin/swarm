@@ -107,10 +107,25 @@ def swarm_exists(name: str) -> bool:
 # ----- commands ----------------------------------------------------------- #
 
 
+# Double Diamond phases. Kickoff sets discover; ventures advance via `swarm advance-phase`.
+PHASES = ("discover", "define", "develop", "deliver")
+
+# Each phase transition requires an artifact (relative to swarm home) to prove
+# the outgoing phase's work is real. Bypass with --force during scaffolding.
+PHASE_GATES = {
+    ("discover", "define"): "discovery-report.md",
+    ("define", "develop"): "venture-brief.md",
+    ("develop", "deliver"): "prototype-spec.md",
+}
+
 SHAPE_LEAN = {
     "shape": "lean",
+    "phase": "discover",
     "leads": ["cos", "founder", "eng-lead", "marketing-lead"],
-    "workers": ["developer", "copywriter", "researcher", "designer", "qa", "reviewer"],
+    "workers": [
+        "developer", "copywriter", "researcher", "designer",
+        "qa", "reviewer", "instrumentation", "deployer",
+    ],
     "skills_per_role": {
         "cos": ["swarm-comms", "swarm-delegate"],
         "founder": ["grilling", "writing-fragments"],
@@ -122,6 +137,8 @@ SHAPE_LEAN = {
 DEFAULT_POLICY = {
     "authority": {
         "default": "gated",
+        # action types that skip the queue and auto-approve. Only add specific
+        # types you've validated (e.g. "staging-deploy" after a few clean runs).
         "auto_approve": [],
     },
     "concurrency": {
@@ -136,6 +153,18 @@ DEFAULT_POLICY = {
     "tokens": {
         "max_per_swarm_per_day": None,
         "max_per_worker_run": None,
+    },
+    "delivery": {
+        "deploy_targets": {
+            "staging": {"gate": "gated", "auto_approve_after_clean_runs": 5},
+            "production": {"gate": "gated"},
+        },
+        "feature_flag_rollout": {
+            "auto_approve_at_or_below_percent": 0,
+        },
+        "external_comms": {
+            "auto_approve_at_or_below_recipients": 0,
+        },
     },
 }
 
@@ -471,6 +500,63 @@ def cmd_request_approval(args) -> None:
     out({"added": a}, f"✓ approval {a['id']} queued")
 
 
+def cmd_phase(args) -> None:
+    name, home = _swarm_for(args.venture if hasattr(args, "venture") else None)
+    shape = read_json(home / "shape.json", {})
+    phase = shape.get("phase", "discover")
+    payload = {"venture": name, "phase": phase, "phases": list(PHASES)}
+    idx = PHASES.index(phase) if phase in PHASES else -1
+    marker = " ← current"
+    lines = [f"swarm: {name}", f"phase: {phase}", ""]
+    for i, p in enumerate(PHASES):
+        prefix = "✓" if i < idx else ("●" if i == idx else "·")
+        suffix = marker if i == idx else ""
+        lines.append(f"  {prefix} {p}{suffix}")
+    out(payload, "\n".join(lines))
+
+
+def cmd_advance_phase(args) -> None:
+    name, home = _swarm_for(args.venture)
+    shape = read_json(home / "shape.json", {})
+    current = shape.get("phase", "discover")
+    target = args.target
+
+    if target not in PHASES:
+        die(f"unknown phase '{target}'. valid: {', '.join(PHASES)}")
+
+    cur_idx = PHASES.index(current)
+    tgt_idx = PHASES.index(target)
+
+    if tgt_idx == cur_idx:
+        die(f"already in phase '{current}'")
+    if tgt_idx < cur_idx and not args.force:
+        die(f"refusing to move backward ({current} → {target}). pass --force if you really mean it.")
+    if tgt_idx > cur_idx + 1 and not args.force:
+        die(f"refusing to skip phases ({current} → {target}). advance one at a time or pass --force.")
+
+    # gate check — only when advancing one step forward
+    if tgt_idx == cur_idx + 1 and not args.force:
+        required = PHASE_GATES.get((current, target))
+        if required and not (home / required).exists():
+            die(
+                f"gate failed: {current}→{target} requires artifact '{required}' at {home}. "
+                f"Produce it first, or pass --force to bypass."
+            )
+
+    shape["phase"] = target
+    shape.setdefault("phase_history", []).append({
+        "from": current, "to": target, "at": now_iso(),
+        "forced": bool(args.force),
+    })
+    write_json(home / "shape.json", shape)
+    payload = {"venture": name, "from": current, "to": target}
+    human = (
+        f"✓ {name}: {current} → {target}"
+        + (f"  (gate: {PHASE_GATES.get((current, target)) or 'none'})" if not args.force else "  (forced)")
+    )
+    out(payload, human)
+
+
 def cmd_archive(args) -> None:
     name = args.name
     if not swarm_exists(name):
@@ -553,6 +639,16 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--irreversible", action="store_true")
     s.add_argument("--venture", default=None)
     s.set_defaults(func=cmd_request_approval)
+
+    s = sub.add_parser("phase", help="show current Double Diamond phase")
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_phase)
+
+    s = sub.add_parser("advance-phase", help="advance to next Double Diamond phase (with gate)")
+    s.add_argument("target", choices=list(PHASES))
+    s.add_argument("--force", action="store_true", help="bypass artifact gate")
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_advance_phase)
 
     s = sub.add_parser("archive", help="archive a swarm")
     s.add_argument("name")

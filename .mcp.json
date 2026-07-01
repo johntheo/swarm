@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "github": {
+      "type": "http",
+      "url": "https://api.githubcopilot.com/mcp/",
+      "headers": {
+        "Authorization": "Bearer ${user_config.github_token}"
+      }
+    },
+    "posthog": {
+      "command": "npx",
+      "args": ["-y", "@posthog/mcp"],
+      "env": {
+        "POSTHOG_API_KEY": "${user_config.posthog_api_key}",
+        "POSTHOG_HOST": "${user_config.posthog_host}",
+        "POSTHOG_PROJECT_ID": "${user_config.posthog_project_id}"
+      }
+    },
+    "sentry": {
+      "type": "http",
+      "url": "https://mcp.sentry.dev/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.sentry_auth_token}"
+      }
+    }
+  }
+}

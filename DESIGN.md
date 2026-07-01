@@ -161,3 +161,65 @@ Attribution always visible:
 - MCP connectors: GitHub, Linear, Slack, Stripe.
 - CI triage loop.
 - Real-world action authority ratcheting.
+
+---
+
+# v0.2 addendum — Double Diamond + Delivery
+
+Shipped in v0.2:
+
+## Double Diamond as first-class state
+
+`shape.json` gains a `phase` field: `discover | define | develop | deliver`. Kickoff sets `discover`. Advance with `swarm advance-phase <target>`, gated by an artifact:
+
+| Transition | Required artifact |
+|---|---|
+| discover → define | `discovery-report.md` |
+| define → develop | `venture-brief.md` (updated after define) |
+| develop → deliver | `prototype-spec.md` |
+
+Gates can be bypassed with `--force`. Every transition is logged to `shape.json` → `phase_history`.
+
+Orchestrator biases behavior per phase (see SKILL.md). Deliver-phase adds finer approval action types and per-target deploy policy.
+
+## Delivery workers
+
+- **`swarm-instrumentation`**: adds PostHog analytics events + creates feature flags (initial 0% rollout) for new features. Maintains `artifacts/instrumentation/taxonomy.md` as the canonical event schema.
+- **`swarm-deployer`**: runs deploys per target (`staging` | `production`) via GitHub Actions. Reads `policy.json` → `delivery.deploy_targets.<target>.gate`. Post-deploy: checks Sentry for new issue signatures.
+
+Both only spawn in `deliver` phase.
+
+## Policy for delivery
+
+`policy.json` gains a `delivery` section:
+
+```json
+"delivery": {
+  "deploy_targets": {
+    "staging":    { "gate": "gated", "auto_approve_after_clean_runs": 5 },
+    "production": { "gate": "gated" }
+  },
+  "feature_flag_rollout": { "auto_approve_at_or_below_percent": 0 },
+  "external_comms":       { "auto_approve_at_or_below_recipients": 0 }
+}
+```
+
+`authority.auto_approve` accepts action-type strings: `["staging-deploy", "internal-comms"]`. Ratchet trust over time by adding entries.
+
+## MCP integrations (opt-in via userConfig)
+
+Three MCPs are configured via `.mcp.json`:
+
+- **GitHub** — hosted at `https://api.githubcopilot.com/mcp/` (HTTP transport). Auth via bearer token.
+- **PostHog** — `npx -y @posthog/mcp` (stdio). Requires personal API key + project id.
+- **Sentry** — hosted at `https://mcp.sentry.dev/mcp` (HTTP transport). Auth via bearer token.
+
+All tokens are declared in `plugin.json` → `userConfig` as optional + sensitive. Plugin core works with tokens empty; only delivery workers need them.
+
+## What v0.2 doesn't change
+
+- The core model (orchestrator + skill; leads + workers as subagents).
+- The scoping resolver.
+- The worker contract (brief → result → memory_updates).
+- Kickoff mode (inline grilling).
+
