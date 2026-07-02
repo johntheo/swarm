@@ -223,3 +223,50 @@ All tokens are declared in `plugin.json` → `userConfig` as optional + sensitiv
 - The worker contract (brief → result → memory_updates).
 - Kickoff mode (inline grilling).
 
+---
+
+# v0.3 addendum — claude.ai roundtrip
+
+The swarm is the strategic source of truth. But claude.ai artifacts (live HTML/React) are the right tool for visual UX exploration, competitive scanning with heavy web use, or drafting outbound where you want a fresh eye. Rather than pretend the swarm should do everything, v0.3 adds two thin helpers to make the roundtrip smooth.
+
+## `swarm export-context [--for MODE] [--copy | --out PATH]`
+
+Bundles the venture brief + a mode-specific slice of lead memory into a single markdown blob. Modes:
+
+| Mode | What's included |
+|---|---|
+| `design` | brief + founder/market_thesis + founder/customer_insights + marketing-lead/positioning + marketing-lead/voice |
+| `research` | brief + founder/market_thesis + founder/customer_insights + founder/competitors |
+| `outreach` | brief + marketing-lead/positioning + marketing-lead/voice + marketing-lead/channels |
+| `planning` | brief + cos/decisions + founder/market_thesis + eng-lead/architecture + marketing-lead/positioning |
+
+Missing memory topics are skipped silently (early ventures have empty memory). Output goes to stdout (default), a file (`--out`), or the clipboard (`--copy`, uses `pbcopy` on macOS).
+
+The bundle includes a **prompt guide** at the end tailored to the mode ("help me explore visual/UX directions … output a self-contained artifact I can save") and a **return instruction** telling the user how to feed the result back in.
+
+## `swarm import-design <source> [--kind design|research|note] [--slug NAME] [--summary PATH]`
+
+Takes a file the user brought back from claude.ai and places it into `artifacts/<kind>/<slug>-<ts>.<ext>`, alongside a summary file (`.md`). If `--summary` is provided, that markdown is copied as-is; otherwise a stub template is created for the user to fill in ("Why this direction won / What we rejected and why / Open decisions").
+
+Returns (JSON or human) a `next_step_hint` the orchestrator uses to know what to do next — typically spawn `swarm-designer` to produce a structured spec from the imported direction.
+
+## What the orchestrator does with these
+
+The `swarm` skill teaches it to:
+
+1. Suggest `export-context` when the user signals a jump ("I want to explore this visually", "let me draft outbound").
+2. Suggest `import-design` when they come back with an artifact ("I saved a landing page", "here's the direction I picked").
+3. After import, act on `next_step_hint` — spawn the right subagent to consume the artifact.
+
+The user never has to memorize commands. But when they do, the CLI is honest and predictable.
+
+## Why not in-plugin visual iteration
+
+We considered a `swarm-visualizer` worker that produces HTML/React artifacts inside the swarm. Deferred to a later version because:
+
+1. Multi-turn visual iteration is inherently conversational; a one-shot subagent is a poor fit.
+2. claude.ai already does this beautifully; duplicating it doesn't earn its keep.
+3. The roundtrip's real friction is context loss, not tool switching. The helpers solve exactly that.
+
+If the helpers prove insufficient, revisit.
+

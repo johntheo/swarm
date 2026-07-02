@@ -1,8 +1,8 @@
 {
   "name": "swarm",
   "displayName": "Swarm",
-  "version": "0.2.0",
-  "description": "Run a virtual startup org — founders, engineers, marketing — from inside Claude Code. Double Diamond phases (discover → define → develop → deliver). GitHub / PostHog / Sentry MCPs for delivery.",
+  "version": "0.3.0",
+  "description": "Run a virtual startup org — founders, engineers, marketing — from inside Claude Code. Double Diamond phases (discover → define → develop → deliver). Claude.ai roundtrip helpers for visual exploration. GitHub / PostHog / Sentry MCPs for delivery.",
   "author": {
     "name": "John Theo Souza",
     "email": "john.theo.souza@gmail.com"

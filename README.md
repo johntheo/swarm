@@ -96,10 +96,34 @@ Before advancing a venture to `deliver`:
 
 MCP package names above are best-effort as of 2026-07. If a provider ships a new canonical URL/package, edit `.claude-plugin/plugin.json` and `.mcp.json` — the tokens still slot in via `${user_config.*}`.
 
+## Roundtrip with claude.ai (v0.3)
+
+The swarm is the strategic source of truth; claude.ai artifacts are unbeatable for live visual/UX iteration. Two commands smooth the roundtrip:
+
+```bash
+# jumping out — bundle context for pasting into claude.ai
+swarm export-context --for design --copy    # copies to clipboard
+swarm export-context --for research --out ctx.md   # or writes to file
+swarm export-context --for outreach          # or prints to stdout
+
+# coming back — drop the artifact into the venture and get a next-step hint
+swarm import-design ~/Downloads/landing.tsx --slug landing-v1 \
+  --summary ~/notes/why-this-won.md
+```
+
+`export-context` modes (`--for ...`):
+
+- **design** — brief + Founder market/customer memory + Marketing positioning/voice
+- **research** — brief + Founder market/customer/competitors memory
+- **outreach** — brief + Marketing positioning/voice/channels
+- **planning** — brief + CoS decisions + Founder thesis + Eng architecture + Marketing positioning
+
+The orchestrator will suggest the roundtrip when it makes sense — you don't have to memorize the commands. Say _"I want to jump to claude.ai to explore visually"_ or _"I brought back a design"_ and it handles the plumbing.
+
 ## What's in v0.2
 
 - `/swarm-new <name>` — bootstrap a venture.
-- `swarm` CLI: `new`, `here`, `list`, `switch`, `status`, `phase`, `advance-phase`, `answer`, `approve`, `reject`, `ask`, `request-approval`, `archive`.
+- `swarm` CLI: `new`, `here`, `list`, `switch`, `status`, `phase`, `advance-phase`, `export-context`, `import-design`, `answer`, `approve`, `reject`, `ask`, `request-approval`, `archive`.
 - Lead consultation (Founder, Eng Lead, Marketing Lead) with transparent attribution + memory write-back.
 - Background workers with brief/result file contract + auto-retry-once on crash → escalate.
 - Delivery workers: `swarm-instrumentation` (PostHog events + flags) + `swarm-deployer` (GitHub Actions deploys + Sentry post-check).

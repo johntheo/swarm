@@ -155,6 +155,8 @@ User says → you run:
 | "Archive acme" / "We're done with acme" | `swarm archive acme` (confirm first — archive is hard to undo) |
 | "What phase are we in" / "phase status" | `swarm phase --json` |
 | "Move to define / develop / deliver" / "we're ready for X" | `swarm advance-phase <target>` (respect gate; surface what's needed if it fails) |
+| "I want to jump to claude.ai to explore visually / do research / draft outbound" | `swarm export-context --for design\|research\|outreach\|planning --copy` (bundles brief + relevant memory into their clipboard) |
+| "I brought back a design from claude.ai" / "here's the artifact I saved" | `swarm import-design <path> --kind design --slug <name>` (drops artifact + summary into `artifacts/design/`) then follow the returned `next_step_hint` to spawn the right subagent |
 | "Show me question 001" | Read `{swarm_home}/questions/pending.json`, render the item with id `q-001` |
 | "Show me the brief" | Read `{swarm_home}/venture-brief.md` |
 | "Show me the founder's market thesis" | Read `{swarm_home}/agents/founder/memory/market_thesis.md` |
@@ -188,6 +190,29 @@ The `/swarm-new` slash command runs `swarm new <name>` to scaffold. After that, 
 - **State your routing**: "Let me ask X" before spawning. "Spawning Y on Z" when delegating. The user should always know who's doing what.
 - **Don't paste large files into subagent prompts**: tell them which file to read. Subagent contexts should be clean.
 - **Don't write to memory dirs from the orchestrator session unless applying a `memory_updates:` block from a subagent result**. You are the single writer; subagents write only to their own spawned dir or via the CLI (`swarm ask`, `swarm request-approval`).
+
+## Roundtrip with claude.ai (v0.3)
+
+The swarm holds strategic memory; claude.ai artifacts are great for live visual/UX iteration. When the user signals a jump out (typically in **develop** phase for design exploration, or **discover** phase for open-ended research), offer the export helper:
+
+> "Want me to bundle the brief + relevant memory to your clipboard so you can paste it into a claude.ai session?"
+
+Then run `swarm export-context --for <mode> --copy` on their yes. Modes:
+
+- `design` — brief + Founder market/customer memory + Marketing positioning/voice.
+- `research` — brief + Founder market/customer/competitors memory.
+- `outreach` — brief + Marketing positioning/voice/channels.
+- `planning` — brief + CoS decisions + Founder thesis + Eng architecture + Marketing positioning.
+
+When they come back and say "I saved the artifact" or "here's the file I brought", parse the path they mention (or ask for it), then run:
+
+```bash
+swarm import-design <path> --kind design --slug <short-name>
+```
+
+If they've written a "why this direction won" summary, pass `--summary <path>` too; otherwise a stub is created for them to fill in. Read the returned `next_step_hint` and act on it — typically: spawn `swarm-designer` with a brief pointing at both files, then queue the dev worker off the resulting spec.
+
+**Don't do the roundtrip silently.** Say "exporting design context to your clipboard now" or "imported to `artifacts/design/...`" so the user knows the plumbing worked.
 
 ## Deliver-phase specifics (v0.2)
 

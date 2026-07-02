@@ -574,6 +574,223 @@ def cmd_archive(args) -> None:
     out({"archived": name, "dest": str(dest)}, f"✓ archived {name} → {dest}")
 
 
+# Which memory files travel with each export mode. Missing files are skipped
+# silently — venture memory starts empty and fills over time.
+EXPORT_MODE_MEMORY = {
+    "design": [
+        ("founder", "market_thesis.md"),
+        ("founder", "customer_insights.md"),
+        ("marketing-lead", "positioning.md"),
+        ("marketing-lead", "voice.md"),
+    ],
+    "research": [
+        ("founder", "market_thesis.md"),
+        ("founder", "customer_insights.md"),
+        ("founder", "competitors.md"),
+    ],
+    "outreach": [
+        ("marketing-lead", "positioning.md"),
+        ("marketing-lead", "voice.md"),
+        ("marketing-lead", "channels.md"),
+    ],
+    "planning": [
+        ("cos", "decisions.md"),
+        ("founder", "market_thesis.md"),
+        ("eng-lead", "architecture.md"),
+        ("marketing-lead", "positioning.md"),
+    ],
+}
+
+EXPORT_MODE_PROMPT_GUIDE = {
+    "design": (
+        "You have a venture brief + relevant strategic context. Help me explore "
+        "visual/UX directions. Ask clarifying questions if you need. When we converge "
+        "on a direction, output a self-contained artifact (React or HTML) I can save."
+    ),
+    "research": (
+        "You have a venture brief + market context. Help me do focused research: "
+        "competitor landscape, ICP validation, or a specific open question. Cite sources; "
+        "flag disconfirming evidence explicitly."
+    ),
+    "outreach": (
+        "You have positioning, voice, and channel context. Help me draft outbound "
+        "material (posts, emails, DMs) that fits the voice and lands the one thing that has to land."
+    ),
+    "planning": (
+        "You have cross-functional context. Help me plan the next chunk of work: "
+        "sequence, dependencies, cuttable scope, first thing to ship."
+    ),
+}
+
+
+def cmd_export_context(args) -> None:
+    name, home = _swarm_for(args.venture)
+    mode = args.mode
+    if mode not in EXPORT_MODE_MEMORY:
+        die(f"unknown mode '{mode}'. valid: {', '.join(EXPORT_MODE_MEMORY)}")
+
+    brief_path = home / "venture-brief.md"
+    brief = brief_path.read_text() if brief_path.exists() else "_(no venture-brief.md yet — kickoff hasn't produced one)_"
+
+    parts = [
+        f"# Context bundle — {name}",
+        f"_Exported {now_iso()} from `{home}`. Mode: **{mode}**._",
+        "",
+        "## Venture brief",
+        brief,
+        "",
+        "## Relevant memory",
+    ]
+
+    included = []
+    for role, topic in EXPORT_MODE_MEMORY[mode]:
+        path = home / "agents" / role / "memory" / topic
+        if path.exists():
+            parts.append(f"### `{role}/memory/{topic}`")
+            parts.append(path.read_text().rstrip())
+            parts.append("")
+            included.append(f"{role}/{topic}")
+    if not included:
+        parts.append("_(no memory topics yet — this venture is early)_")
+        parts.append("")
+
+    parts.append("## Prompt guide")
+    parts.append(EXPORT_MODE_PROMPT_GUIDE[mode])
+    parts.append("")
+    parts.append("## Returning to the swarm")
+    parts.append(
+        "When done, save your winning artifact to a file. Then in the swarm run:\n\n"
+        f"```\nswarm import-design <file> --kind {'design' if mode == 'design' else 'note'} \\\n"
+        "  --slug <short-name> --summary <optional-summary.md>\n```\n"
+    )
+
+    bundle = "\n".join(parts)
+
+    # write / copy / print
+    written = None
+    copied = False
+    if args.out:
+        out_path = Path(args.out).expanduser().resolve()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(bundle)
+        written = str(out_path)
+    if args.copy:
+        import subprocess
+        try:
+            subprocess.run(["pbcopy"], input=bundle, text=True, check=True)
+            copied = True
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            print("swarm: --copy failed (pbcopy not available). Printing bundle instead.", file=sys.stderr)
+    if not args.out and not args.copy:
+        # default: print bundle to stdout so user can pipe
+        sys.stdout.write(bundle)
+        return
+
+    payload = {
+        "venture": name,
+        "mode": mode,
+        "included_memory": included,
+        "written_to": written,
+        "copied_to_clipboard": copied,
+        "bytes": len(bundle),
+    }
+    human_lines = [f"✓ exported context for '{name}' (mode: {mode}, {len(bundle):,} bytes)"]
+    if written:
+        human_lines.append(f"  written to: {written}")
+    if copied:
+        human_lines.append(f"  copied to clipboard — paste into claude.ai")
+    if included:
+        human_lines.append(f"  memory included: {', '.join(included)}")
+    else:
+        human_lines.append("  no memory files yet (venture is early)")
+    out(payload, "\n".join(human_lines))
+
+
+def _slugify(text: str) -> str:
+    import re
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug or "artifact"
+
+
+def cmd_import_design(args) -> None:
+    name, home = _swarm_for(args.venture)
+    src = Path(args.source).expanduser().resolve()
+    if not src.exists():
+        die(f"source file not found: {src}")
+
+    kind = args.kind
+    if kind not in ("design", "research", "note"):
+        die(f"unknown kind '{kind}'. valid: design, research, note")
+
+    slug = args.slug or _slugify(src.stem)
+    ts = int(time.time())
+    ext = src.suffix or ".txt"
+
+    dest_dir = home / "artifacts" / kind
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"{slug}-{ts}{ext}"
+    shutil.copy(src, dest)
+
+    # summary handling
+    summary_dest = dest_dir / f"{slug}-{ts}.md"
+    if args.summary:
+        summary_src = Path(args.summary).expanduser().resolve()
+        if not summary_src.exists():
+            die(f"summary file not found: {summary_src}")
+        shutil.copy(summary_src, summary_dest)
+        summary_status = "provided"
+    else:
+        summary_dest.write_text(
+            f"# {slug} — imported {datetime.now(timezone.utc).date().isoformat()}\n\n"
+            f"_Kind: {kind}. Source: `{src.name}` → `{dest.name}`._\n\n"
+            "## Why this direction won\n_TBD — fill this in._\n\n"
+            "## What we rejected and why\n_TBD._\n\n"
+            "## Open decisions for the developer/lead\n_TBD._\n"
+        )
+        summary_status = "stub_created"
+
+    # suggested next-step brief for the orchestrator to consume
+    next_step = {
+        "design": (
+            f"Spawn swarm-designer with brief pointing at:\n"
+            f"  artifact: {dest}\n"
+            f"  summary:  {summary_dest}\n"
+            f"Task: produce a structured design spec (flows, states, edge cases) "
+            f"that a developer can implement from. Reference the imported direction."
+        ),
+        "research": (
+            f"Spawn a lead consultation (Founder or Marketing) to react to:\n"
+            f"  research: {dest}\n"
+            f"  summary:  {summary_dest}\n"
+            f"Task: extract implications for thesis/positioning; propose memory updates."
+        ),
+        "note": (
+            f"Read the imported note and decide the next move:\n"
+            f"  note: {dest}\n"
+            f"  summary: {summary_dest}"
+        ),
+    }[kind]
+
+    payload = {
+        "venture": name,
+        "kind": kind,
+        "slug": slug,
+        "artifact_path": str(dest),
+        "summary_path": str(summary_dest),
+        "summary_status": summary_status,
+        "next_step_hint": next_step,
+    }
+    lines = [
+        f"✓ imported '{src.name}' → artifacts/{kind}/",
+        f"  artifact: {dest}",
+        f"  summary:  {summary_dest} ({summary_status})",
+        "",
+        "Next step:",
+        next_step,
+    ]
+    out(payload, "\n".join(lines))
+
+
 # ----- main --------------------------------------------------------------- #
 
 
@@ -643,6 +860,25 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("phase", help="show current Double Diamond phase")
     s.add_argument("--venture", default=None)
     s.set_defaults(func=cmd_phase)
+
+    s = sub.add_parser("export-context", help="bundle brief + memory for claude.ai roundtrip")
+    s.add_argument("--for", dest="mode", default="design",
+                   choices=list(EXPORT_MODE_MEMORY.keys()),
+                   help="context flavor (default: design)")
+    s.add_argument("--out", default=None, help="write bundle to a file")
+    s.add_argument("--copy", action="store_true", help="copy bundle to clipboard (macOS: pbcopy)")
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_export_context)
+
+    s = sub.add_parser("import-design", help="bring a claude.ai artifact back into the swarm")
+    s.add_argument("source", help="path to the artifact file (e.g. an exported .tsx or .html)")
+    s.add_argument("--kind", default="design", choices=["design", "research", "note"],
+                   help="artifact type (default: design)")
+    s.add_argument("--slug", default=None, help="short name for the artifact (defaults to source stem)")
+    s.add_argument("--summary", default=None,
+                   help="path to a markdown summary; if omitted, a stub is created")
+    s.add_argument("--venture", default=None)
+    s.set_defaults(func=cmd_import_design)
 
     s = sub.add_parser("advance-phase", help="advance to next Double Diamond phase (with gate)")
     s.add_argument("target", choices=list(PHASES))
